@@ -1,58 +1,61 @@
-.read_annotation <- function(...){
-    if(format == "gff3"){
+.read_annotation <- function(annotation_file, ...){
+    arg_list <- list(...)
+    if(arg_list$format == "gff3"){
         annotation_ranges <- import.gff3(annotation_file)
-    }else if(format == "gtf"){
+    }else if(arg_list$format == "gtf"){
         annotation_ranges <- import.gff2(annotation_file)
     }
     return(annotation_ranges)
 }
 
 .filter_annotation <- function(a_ranges, ...){
+    arg_list <- list(...)
     genes_ranges <- a_ranges[a_ranges$type == "gene"]
     all_chromosomes <- seqlevels(genes_ranges)
-    if(!is.na(read_chromosomes)){
-        all_chromosomes <- all_chromosomes[all_chromosomes %in% read_chromosomes]
+    if(!is.na(arg_list$read_chromosomes)){
+        all_chromosomes <- all_chromosomes[all_chromosomes %in% arg_list$read_chromosomes]
     }
     genes_ranges <- genes_ranges[seqnames(genes_ranges) %in% all_chromosomes]
-    transcript_ranges <- a_ranges[as.vector(a_ranges$Parent) %in% unique(genes_ranges$ID)]
-    exon_ranges <- a_ranges[a_ranges$type == "exon" & as.vector(a_ranges$Parent) %in% unique(transcript_ranges$ID)]
     
-    # filter ranges for genes greater than length
-    if(!is.na(min_length)){
-        genes_ranges <- genes_ranges[width(genes_ranges) > min_length]
+    if(arg_list$format == "gff3"){
+        transcript_ranges <- a_ranges[as.vector(a_ranges$Parent) %in% unique(genes_ranges$ID)]
+        exon_ranges <- a_ranges[a_ranges$type == "exon" & as.vector(a_ranges$Parent) %in% unique(transcript_ranges$ID)]
+    }else if(arg_list$format == "gtf"){
+        exon_ranges <- a_ranges[a_ranges$type == "exon" & a_ranges$gene_id %in% genes_ranges$gene_id]
     }
-
-    if(non_overlapping){
+    # filter ranges for genes greater than length
+    if(!is.na(arg_list$min_length)){
+        genes_ranges <- genes_ranges[width(genes_ranges) > arg_list$min_length]
+    }
+    if(arg_list$non_overlapping){
         ol_object <- findOverlaps(genes_ranges, genes_ranges, ignore.strand = T)
         ol_object <- ol_object[queryHits(ol_object) != subjectHits(ol_object)]
         keep_indices <- unique(c(queryHits(ol_object), subjectHits(ol_object)))
         genes_ranges <- genes_ranges[!(seq_along(genes_ranges) %in% keep_indices)]
     }
-
-    if(!is.na(min_tss_tes_gap)){
+    if(!is.na(arg_list$min_tss_tes_gap)){
         tss_ranges <- genes_ranges
         end(tss_ranges[strand(tss_ranges) != "-"]) <- start(tss_ranges[strand(tss_ranges) != "-"])
         start(tss_ranges[strand(tss_ranges) == "-"]) <- end(tss_ranges[strand(tss_ranges) == "-"])
-        start(tss_ranges) <- start(tss_ranges) - min_tss_tes_gap
-        end(tss_ranges) <- end(tss_ranges) + min_tss_tes_gap
+        start(tss_ranges) <- start(tss_ranges) - arg_list$min_tss_tes_gap
+        end(tss_ranges) <- end(tss_ranges) + arg_list$min_tss_tes_gap
         tes_ranges <- genes_ranges
         start(tss_ranges[strand(tss_ranges) != "-"]) <- end(tss_ranges[strand(tss_ranges) != "-"])
         end(tss_ranges[strand(tss_ranges) == "-"]) <- start(tss_ranges[strand(tss_ranges) == "-"])
-        start(tes_ranges) <- start(tes_ranges) - min_tss_tes_gap
-        end(tes_ranges) <- end(tes_ranges) + min_tss_tes_gap
+        start(tes_ranges) <- start(tes_ranges) - arg_list$min_tss_tes_gap
+        end(tes_ranges) <- end(tes_ranges) + arg_list$min_tss_tes_gap
         ol_object <- findOverlaps(tss_ranges, tes_ranges)
         ol_object <- ol_object[queryHits(ol_object) != subjectHits(ol_object)]
         keep_indices <- unique(c(queryHits(ol_object), subjectHits(ol_object)))
         genes_ranges <- genes_ranges[!(seq_along(genes_ranges) %in% keep_indices)]
     }
-
-    if(format == "gff3"){
+    if(arg_list$format == "gff3"){
         filtered_transcript_ranges <- transcript_ranges[as.vector(transcript_ranges$Parent) %in% genes_ranges$ID]
         filtered_exon_ranges <- exon_ranges[as.vector(exon_ranges$Parent) %in% unique(filtered_transcript_ranges$ID)]
-        filtered_exon_ranges$gene_id <- genes_ranges$gene_id[
-            match(as.vector(filtered_transcript_ranges$Parent[match(as.vector(filtered_exon_ranges$Parent), 
+        filtered_exon_ranges$gene_id <- genes_ranges$gene_id[match(
+            as.vector(filtered_transcript_ranges$Parent[match(as.vector(filtered_exon_ranges$Parent), 
             filtered_transcript_ranges$ID)]), genes_ranges$ID)]
-    }else if (format == "gtf"){
+    }else if (arg_list$format == "gtf"){
         filtered_exon_ranges <- exon_ranges[exon_ranges$gene_id %in% genes_ranges$gene_id]
     }
     filtered_ranges <- list(genes = genes_ranges, exons = filtered_exon_ranges)
@@ -133,9 +136,14 @@ produce_splice_junctions <- function(annotation_file, read_chromosomes = NA,
     format = c("gff3", "gtf"), min_length = 1000, non_overlapping = T,
     min_tss_tes_gap = NA){
     format <- match.arg(format)
-    annotation_ranges <- .read_annotation(annotation_file, format)
-    filtered_ranges_list <- .filter_annotation(annotation_ranges)
-
+    # message(annotation_file, " ", format)
+    annotation_ranges <- .read_annotation(annotation_file, format = format)
+    filtered_ranges_list <- .filter_annotation(annotation_ranges, 
+        format = format, 
+        read_chromosomes = read_chromosomes, 
+        min_length = min_length,
+        min_tss_tes_gap = min_tss_tes_gap,
+        non_overlapping = non_overlapping)
     exon_ranges <- filtered_ranges_list[["exons"]]
     gene_ranges <- filtered_ranges_list[["genes"]]
     exon_ranges_split <- split(exon_ranges, exon_ranges$gene_id)
@@ -151,22 +159,22 @@ produce_splice_junctions <- function(annotation_file, read_chromosomes = NA,
 }
 
 .extend_regions_beyond_ranges <- function(a_ranges, ...){
+    arg_list <- list(...)
     preceded_by <- precede(a_ranges, ignore.strand = T)
     preceded_by_seq <- seq_along(preceded_by)
     which_not_na <- which(!is.na(preceded_by)) 
     a_ranges$upstream_distance <- NA
     a_ranges$downstream_distance <- NA
-
     a_ranges$upstream_distance[preceded_by[which_not_na]] <- floor((start(a_ranges[preceded_by[which_not_na]]) - end(a_ranges[preceded_by_seq[which_not_na]]))/2)
     a_ranges$downstream_distance[preceded_by_seq[which_not_na]] <- floor((start(a_ranges[preceded_by[which_not_na]]) - end(a_ranges[preceded_by_seq[which_not_na]]))/2)
     a_ranges <- a_ranges[!is.na(a_ranges$upstream_distance) & !is.na(a_ranges$downstream_distance)]
     if(!is.na(min_region_width)){
-        a_ranges <- a_ranges[a_ranges$upstream_distance > min_region_width & 
-            a_ranges$downstream_distance > min_region_width]
+        a_ranges <- a_ranges[a_ranges$upstream_distance > arg_list$min_region_width & 
+            a_ranges$downstream_distance > arg_list$min_region_width]
     }
-    if(!is.na(max_region_width)){
-        a_ranges$upstream_distance[a_ranges$upstream_distance > max_region_width] <- max_region_width
-        a_ranges$downstream_distance[a_ranges$downstream_distance > max_region_width] <- max_region_width
+    if(!is.na(arg_list$max_region_width)){
+        a_ranges$upstream_distance[a_ranges$upstream_distance > arg_list$max_region_width] <- arg_list$max_region_width
+        a_ranges$downstream_distance[a_ranges$downstream_distance > arg_list$max_region_width] <- arg_list$max_region_width
     }
     upstream_region_start <- start(a_ranges) - a_ranges$upstream_distance + 1
     upstream_region_end <- start(a_ranges) - 1
@@ -187,13 +195,20 @@ produce_regions_sorrounding_genes <- function(annotation_file, read_chromosomes 
     format = c("gff3", "gtf"), min_length = 1000, non_overlapping = T,
     min_tss_tes_gap = NA, min_region_width = 1000, max_region_width = 5000){
     format <- match.arg(format)
-    annotation_ranges <- .read_annotation(annotation_file, format)
-    filtered_ranges_list <- .filter_annotation(annotation_ranges, non_overlapping = T)
+    annotation_ranges <- .read_annotation(annotation_file = annotation_file, format = format)
+    filtered_ranges_list <- .filter_annotation(annotation_ranges, 
+        format = format,
+        read_chromosomes = read_chromosomes,
+        min_length = min_length, 
+        min_tss_tes_gap = min_tss_tes_gap,
+        non_overlapping = T)
     gene_ranges <- filtered_ranges_list[["genes"]]
     gene_ids <- gene_ranges$gene_id
     elementMetadata(gene_ranges) <- NULL
     elementMetadata(gene_ranges)[["gene_id"]] <- gene_ids
-    all_ranges <- .extend_regions_beyond_ranges(a_ranges = gene_ranges)
+    all_ranges <- .extend_regions_beyond_ranges(a_ranges = gene_ranges, 
+        min_region_width = min_region_width,
+        max_region_width = max_region_width)
     return(all_ranges)
 }
 
